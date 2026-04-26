@@ -115,7 +115,7 @@ pip install -r requirements.txt
 1. Upload `case_study.ipynb` and `requirements.txt` to Colab
 2. In the first cell, add: `!pip install -r requirements.txt`
 3. Set Runtime → Change runtime type → **T4 GPU**
-4. Run all cells — training takes ~25–40 minutes on GPU
+4. Run all cells — training takes ~12–25 hours on GPU
 
 **Locally (CPU):** Training will take several hours. Reduce `num_epochs` to 10 for a quick test.
 
