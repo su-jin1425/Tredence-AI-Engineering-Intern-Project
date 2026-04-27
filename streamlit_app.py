@@ -1,7 +1,3 @@
-"""
-Self-Pruning Neural Network — Streamlit Dashboard
-Loads model.pkl generated from case_study.ipynb
-"""
 import io
 import math
 import pickle
@@ -64,20 +60,24 @@ class PrunableLinear(nn.Module):
         self.weight       = nn.Parameter(torch.empty(out_features, in_features))
         self.bias         = nn.Parameter(torch.zeros(out_features)) if bias else None
         self.gate_scores  = nn.Parameter(torch.zeros(out_features, in_features))
+        self.temperature: float = 1.0
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gates = torch.sigmoid(self.gate_scores)
-        return F.linear(x, self.weight * gates, self.bias)
+        gates = torch.sigmoid(self.gate_scores / self.temperature)
+        effective_weight = (self.weight * gates).contiguous()
+        return F.linear(x, effective_weight, self.bias)
 
     def get_gates(self) -> torch.Tensor:
         with torch.no_grad():
-            return torch.sigmoid(self.gate_scores)
+            return torch.sigmoid(self.gate_scores / self.temperature)
+
+    def extra_repr(self) -> str:
+        return (f'in={self.in_features}, out={self.out_features}, '
+                f'temperature={self.temperature:.4f}')
 
 
 class SelfPruningMLP(nn.Module):
-    """Inference-only copy of SelfPruningMLP (matches notebook architecture exactly)."""
-
     def __init__(self, dropout: float = 0.25) -> None:
         super().__init__()
         dims = [3072, 2048, 1024, 512, 256, 10]
@@ -91,7 +91,7 @@ class SelfPruningMLP(nn.Module):
                 self.drops.append(nn.Dropout(dropout))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.reshape(x.size(0), -1)
+        x = x.reshape(x.size(0), -1).contiguous()
         for i, layer in enumerate(self.layers[:-1]):
             x = layer(x)
             x = self.bns[i](x)
@@ -99,13 +99,91 @@ class SelfPruningMLP(nn.Module):
             x = self.drops[i](x)
         return self.layers[-1](x)
 
+    def set_temperature(self, t: float) -> None:
+        for layer in self.layers:
+            layer.temperature = t
+
+    def apply_hard_pruning(self, threshold: float = 1e-2) -> 'SelfPruningMLP':
+        import copy
+        hard = copy.deepcopy(self)
+        with torch.no_grad():
+            for layer in hard.layers:
+                mask = (layer.get_gates() >= threshold).float()
+                layer.weight.data *= mask
+                layer.gate_scores.data = torch.where(
+                    mask.bool(),
+                    torch.full_like(layer.gate_scores,  10.0),
+                    torch.full_like(layer.gate_scores, -10.0),
+                )
+        return hard
+
+    def get_total_sparsity(self, threshold: float = 1e-2) -> float:
+        all_gates = torch.cat([l.get_gates().flatten() for l in self.layers])
+        return (all_gates < threshold).float().mean().item()
+
+    def get_active_param_count(self, threshold: float = 1e-2) -> int:
+        return sum((l.get_gates() >= threshold).sum().item() for l in self.layers)
+
+    def get_total_gate_count(self) -> int:
+        return sum(l.gate_scores.numel() for l in self.layers)
+
+
+CIFAR10_CLASSES_ORDERED = [
+    'airplane', 'automobile', 'bird', 'cat', 'deer',
+    'dog', 'frog', 'horse', 'ship', 'truck',
+]
+
+_GITHUB_BASE = (
+    "https://raw.githubusercontent.com"
+    "/YoongiKim/CIFAR-10-images/master/test"
+)
+
+_SAMPLE_INDICES = {
+    'airplane':   '0001',
+    'automobile': '0001',
+    'bird':       '0001',
+    'cat':        '0001',
+    'deer':       '0001',
+    'dog':        '0001',
+    'frog':       '0001',
+    'horse':      '0001',
+    'ship':       '0001',
+    'truck':      '0001',
+}
+
+
+@st.cache_resource(show_spinner=False)
+def load_cifar10_presets() -> Dict[str, Image.Image]:
+    import urllib.request
+    presets: Dict[str, Image.Image] = {}
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    for cls in CIFAR10_CLASSES_ORDERED:
+        idx = _SAMPLE_INDICES[cls]
+        url = f"{_GITHUB_BASE}/{cls}/{idx}.png"
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = resp.read()
+            img = Image.open(io.BytesIO(data)).convert('RGB')
+            presets[cls] = img
+        except Exception:
+            arr = np.full((32, 32, 3), 128, dtype=np.uint8)
+            presets[cls] = Image.fromarray(arr)
+    return presets
+
 
 @st.cache_resource
 def load_model_artifact(path: str = "model.pkl"):
     with open(path, "rb") as f:
         artifact = pickle.load(f)
+
     model = SelfPruningMLP(dropout=artifact['config']['dropout'])
     model.load_state_dict(artifact['model_state_dict'])
+
+    final_temperature = artifact.get('final_temperature', 1.0)
+    model.set_temperature(final_temperature)
+    model = model.apply_hard_pruning(threshold=1e-2)
+    model.set_temperature(1.0)
     model.eval()
     return model, artifact
 
@@ -129,18 +207,21 @@ BONUS_VARIANTS = artifact.get('bonus_variants', [])
 
 def preprocess_image(img: Image.Image) -> torch.Tensor:
     img = img.convert('RGB').resize((32, 32), Image.LANCZOS)
-    arr = np.array(img).astype(np.float32) / 255.0
-    arr = (arr - np.array(NORM_MEAN)) / np.array(NORM_STD)
-    tensor = torch.from_numpy(arr.copy()).permute(2, 0, 1).unsqueeze(0)
+    arr = np.ascontiguousarray(np.array(img).astype(np.float32) / 255.0)
+    arr = ((arr - np.array(NORM_MEAN, dtype=np.float32))
+           / np.array(NORM_STD, dtype=np.float32))
+    arr = np.ascontiguousarray(arr.astype(np.float32))
+    tensor = torch.from_numpy(arr).float().permute(2, 0, 1).unsqueeze(0).contiguous()
     return tensor
 
 
-@torch.no_grad()
 def predict(img: Image.Image) -> Tuple[str, float, List[float]]:
+    model.eval()
     tensor = preprocess_image(img)
-    logits = model(tensor)
-    probs  = F.softmax(logits, dim=1).squeeze().tolist()
-    idx    = int(np.argmax(probs))
+    with torch.no_grad():
+        logits = model(tensor)
+    probs = F.softmax(logits, dim=1).squeeze().tolist()
+    idx   = int(np.argmax(probs))
     return CLASSES[idx], probs[idx] * 100, probs
 
 
@@ -183,14 +264,14 @@ def make_gate_histogram() -> bytes:
     with plt.rc_context(PLOT_CFG):
         fig, ax = plt.subplots(figsize=(8, 4))
         all_gates = torch.cat([
-            l.get_gates().flatten()
-            for l in model.layers
+            l.get_gates().flatten() for l in model.layers
         ]).numpy()
         ax.hist(all_gates, bins=80, color='#7c6cf8', edgecolor='none', alpha=0.85)
-        ax.axvline(x=0.01, color='#f85c6c', linestyle='--', linewidth=2, label='Threshold=0.01')
+        ax.axvline(x=0.01, color='#f85c6c', linestyle='--', linewidth=2,
+                   label='Threshold=0.01')
         ax.set_xlabel('Gate Value')
         ax.set_ylabel('Count')
-        ax.set_title('Distribution of Final Gate Values')
+        ax.set_title('Distribution of Final Gate Values (after hard pruning)')
         ax.legend()
     return fig_to_bytes(fig)
 
@@ -209,7 +290,7 @@ def make_layerwise_sparsity_chart() -> bytes:
     return fig_to_bytes(fig)
 
 
-def make_tradeoff_chart() -> bytes:
+def make_tradeoff_chart() -> Optional[bytes]:
     if not LAMBDA_RESULTS:
         return None
     with plt.rc_context(PLOT_CFG):
@@ -222,10 +303,36 @@ def make_tradeoff_chart() -> bytes:
         cb = plt.colorbar(sc, ax=ax)
         cb.set_label('log10(lambda)')
         for s, a, l in zip(sp, acc, lam):
-            ax.annotate(f'lambda={l}', (s, a), xytext=(5, 4), textcoords='offset points', fontsize=8)
+            ax.annotate(f'lambda={l}', (s, a), xytext=(5, 4),
+                        textcoords='offset points', fontsize=8)
         ax.set_xlabel('Sparsity (%)')
         ax.set_ylabel('Test Accuracy (%)')
         ax.set_title('Accuracy vs. Sparsity Tradeoff')
+    return fig_to_bytes(fig)
+
+
+def make_preset_grid(presets: Dict[str, Image.Image], selected_name: str) -> bytes:
+    cols_n = 5
+    rows_n = math.ceil(len(presets) / cols_n)
+    with plt.rc_context(PLOT_CFG):
+        fig, axes = plt.subplots(rows_n, cols_n,
+                                 figsize=(cols_n * 2.0, rows_n * 2.4))
+        axes_flat = axes.flatten() if rows_n > 1 else list(axes)
+        for idx, (name, img) in enumerate(presets.items()):
+            ax = axes_flat[idx]
+            display = img.resize((64, 64), Image.NEAREST)
+            ax.imshow(display)
+            label = name.replace('_', ' ').capitalize()
+            ax.set_title(label, fontsize=8, color='#e0e0e0', pad=3)
+            ax.axis('off')
+            if name == selected_name:
+                for spine in ax.spines.values():
+                    spine.set_edgecolor('#7c6cf8')
+                    spine.set_linewidth(3)
+                    spine.set_visible(True)
+        for idx in range(len(presets), len(axes_flat)):
+            axes_flat[idx].axis('off')
+        fig.tight_layout(pad=0.4)
     return fig_to_bytes(fig)
 
 
@@ -235,17 +342,30 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown("### Best Model")
-    st.markdown(f"<span class='pill'>lambda = {BEST_METRICS['lambda']}</span>", unsafe_allow_html=True)
-    st.markdown(f"<span class='pill'>Acc = {BEST_METRICS['test_accuracy']:.2f}%</span>", unsafe_allow_html=True)
-    st.markdown(f"<span class='pill'>Sparsity = {BEST_METRICS['sparsity_pct']:.2f}%</span>", unsafe_allow_html=True)
-    st.markdown(f"<span class='pill'>{BEST_METRICS['compression_ratio']:.2f}x compressed</span>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill'>lambda = {BEST_METRICS['lambda']}</span>",
+                unsafe_allow_html=True)
+    st.markdown(f"<span class='pill'>Acc = {BEST_METRICS['test_accuracy']:.2f}%</span>",
+                unsafe_allow_html=True)
+    st.markdown(f"<span class='pill'>Sparsity = {BEST_METRICS['sparsity_pct']:.2f}%</span>",
+                unsafe_allow_html=True)
+    st.markdown(
+        f"<span class='pill'>{BEST_METRICS['compression_ratio']:.2f}x compressed</span>",
+        unsafe_allow_html=True)
 
     if BASELINE_ACC:
         st.markdown("---")
         st.markdown("### Dense Baseline")
-        st.markdown(f"<span class='pill'>Acc = {BASELINE_ACC:.2f}%</span>", unsafe_allow_html=True)
+        st.markdown(f"<span class='pill'>Acc = {BASELINE_ACC:.2f}%</span>",
+                    unsafe_allow_html=True)
         acc_drop = BASELINE_ACC - BEST_METRICS['test_accuracy']
-        st.markdown(f"<span class='pill'>Drop = {acc_drop:.2f}%</span>", unsafe_allow_html=True)
+        st.markdown(f"<span class='pill'>Drop = {acc_drop:.2f}%</span>",
+                    unsafe_allow_html=True)
+
+    ft = artifact.get('final_temperature', 1.0)
+    st.markdown("---")
+    st.markdown("### Training Config")
+    st.markdown(f"<span class='pill'>Final Temp = {ft:.4f}</span>",
+                unsafe_allow_html=True)
 
     st.markdown("---")
     st.markdown("### Architecture")
@@ -266,18 +386,42 @@ with tab1:
     col_upload, col_result = st.columns([1, 1.5])
 
     with col_upload:
-        st.markdown("#### Upload an Image")
-        st.caption("Upload any 32x32 (or larger) image; it will be resized to CIFAR-10 format.")
-        uploaded = st.file_uploader("", type=["png", "jpg", "jpeg", "bmp", "webp"])
+        st.markdown("#### Upload or Select an Image")
+        st.caption("Upload your own image or choose a synthetic preset below.")
 
-        if uploaded:
-            img = Image.open(uploaded)
-            st.image(img, caption="Uploaded Image", use_container_width=True)
+        input_mode = st.radio("Input mode", ["Upload image", "Use preset sample"],
+                              horizontal=True)
+
+        active_image: Optional[Image.Image] = None
+
+        if input_mode == "Upload image":
+            uploaded = st.file_uploader("", type=["png", "jpg", "jpeg", "bmp", "webp"])
+            if uploaded:
+                active_image = Image.open(uploaded)
+                st.image(active_image, caption="Uploaded Image", use_container_width=True)
+
+        else:
+            with st.spinner("Loading CIFAR-10 sample images..."):
+                cifar_presets = load_cifar10_presets()
+
+            preset_name = st.selectbox("Choose a class", list(cifar_presets.keys()))
+            active_image = cifar_presets[preset_name]
+
+            st.markdown("**Selected sample (32x32 native CIFAR-10):**")
+            st.image(active_image.resize((128, 128), Image.NEAREST),
+                     caption=f"{preset_name}", width=128)
+
+            st.markdown("**All 10 CIFAR-10 classes:**")
+            st.image(make_preset_grid(cifar_presets, preset_name), use_container_width=True)
+            st.caption(
+                "Images are real 32x32 samples from the CIFAR-10 test set "
+                "(YoongiKim/CIFAR-10-images). Nearest-neighbour upscaling is used for display only; "
+                "inference uses the original 32x32 pixels."
+            )
 
     with col_result:
-        if uploaded:
-            img = Image.open(uploaded)
-            predicted_class, confidence, probs = predict(img)
+        if active_image is not None:
+            predicted_class, confidence, probs = predict(active_image)
 
             st.markdown("#### Prediction")
             st.markdown(f"""
@@ -292,16 +436,16 @@ with tab1:
             """, unsafe_allow_html=True)
 
             st.markdown("#### Confidence Scores")
-            chart_bytes = make_confidence_chart(probs)
-            st.image(chart_bytes, use_container_width=True)
+            st.image(make_confidence_chart(probs), use_container_width=True)
         else:
-            st.info("Upload an image on the left to run inference.")
+            st.info("Upload an image or select a preset on the left to run inference.")
 
     st.markdown("---")
     st.markdown("#### CIFAR-10 Classes")
-    cols = st.columns(5)
+    cls_cols = st.columns(5)
     for i, cls in enumerate(CLASSES):
-        cols[i % 5].markdown(f"<span class='pill'>{i}: {cls}</span>", unsafe_allow_html=True)
+        cls_cols[i % 5].markdown(
+            f"<span class='pill'>{i}: {cls}</span>", unsafe_allow_html=True)
 
 
 with tab2:
@@ -342,9 +486,9 @@ with tab2:
     st.markdown("---")
     st.markdown("#### Parameter Summary")
     pcols = st.columns(3)
-    pcols[0].metric("Total Gate Params",  f"{BEST_METRICS['total_weights']:,}")
-    pcols[1].metric("Active Params",      f"{BEST_METRICS['active_weights']:,}")
-    pcols[2].metric("Params Saved",       f"{BEST_METRICS['params_saved']:,}")
+    pcols[0].metric("Total Gate Params", f"{BEST_METRICS['total_weights']:,}")
+    pcols[1].metric("Active Params",     f"{BEST_METRICS['active_weights']:,}")
+    pcols[2].metric("Params Saved",      f"{BEST_METRICS['params_saved']:,}")
 
     if SWEEP:
         st.markdown("---")
@@ -352,7 +496,7 @@ with tab2:
         import pandas as pd
         st.dataframe(
             pd.DataFrame(SWEEP).rename(columns={
-                'threshold': 'Gate Threshold',
+                'threshold':    'Gate Threshold',
                 'accuracy_pct': 'Accuracy (%)',
                 'sparsity_pct': 'Sparsity (%)',
             }),
@@ -371,14 +515,14 @@ with tab3:
 
         st.dataframe(
             df.rename(columns={
-                'lambda': 'Lambda',
-                'test_accuracy': 'Test Acc (%)',
-                'sparsity_pct': 'Sparsity (%)',
-                'active_weights': 'Active Weights',
-                'compression_ratio': 'Compression',
-                'params_saved': 'Params Saved',
-                'flops_saved_pct': 'FLOPs Saved (%)',
-                'accuracy_drop_vs_dense': 'Acc Drop',
+                'lambda':                'Lambda',
+                'test_accuracy':         'Test Acc (%)',
+                'sparsity_pct':          'Sparsity (%)',
+                'active_weights':        'Active Weights',
+                'compression_ratio':     'Compression',
+                'params_saved':          'Params Saved',
+                'flops_saved_pct':       'FLOPs Saved (%)',
+                'accuracy_drop_vs_dense':'Acc Drop',
             }),
             use_container_width=True,
         )
@@ -401,16 +545,26 @@ with tab4:
     st.markdown("#### How Self-Pruning Works")
     st.markdown("""
     Each weight in every `PrunableLinear` layer has a learnable **gate score** parameter.
-    During forward pass:
+
+    **During forward pass (temperature-annealed):**
     ```
-    gate = sigmoid(gate_score / temperature)
+    gate             = sigmoid(gate_score / temperature)
     effective_weight = weight x gate
     ```
-    The sparsity loss penalises the sum of all gate values, pushing them toward **0** (connection removed).
-    Total loss = CrossEntropyLoss + lambda x sum(sigmoid(gate_scores))
 
-    **Temperature annealing** sharpens gates from soft (approx 0.5) toward hard binary (0 or 1) over training epochs,
-    using cosine decay from temperature_start=1.0 to temperature_end=0.1.
+    **Total training loss:**
+    ```
+    Loss = CrossEntropyLoss + lambda x mean(sigmoid(gate_scores / T))
+    ```
+
+    The sparsity term pushes **gate_scores negative** (connection removed).
+
+    **Temperature annealing** sharpens gates from soft (T=2.0 -> sigmoid near 0.5 for all)
+    toward hard binary (T=0.05 -> sigmoid near 0 or 1) using cosine decay over training epochs.
+    At T=0.05 a gate_score of just +/-1.0 gives sigmoid(+/-20) near 0 or 1, making pruning
+    easy to achieve even with moderate lambda values.
+
+    **After training**, hard pruning binarises gate_scores to +/-10 for stable inference.
     """)
 
     st.markdown("---")
@@ -439,5 +593,6 @@ with tab4:
         st.markdown("---")
         st.markdown("#### Structured Pruning - Dead Neurons")
         import pandas as pd
-        rows = [{'Layer Metric': k, 'Dead Neurons': v} for k, v in struct_stats.items()]
+        rows = [{'Layer Metric': k, 'Dead Neurons': v}
+                for k, v in struct_stats.items()]
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
