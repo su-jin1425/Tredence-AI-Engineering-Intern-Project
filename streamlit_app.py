@@ -226,13 +226,13 @@ def _green_patches(size: int = 64) -> Image.Image:
 
 
 BUILTIN_PRESETS: Dict[str, Image.Image] = {
-    "Sky Scene (airplane/bird)":   _sky_scene(),
-    "Red Circle on White (car)":   _circle_on_bg((200, 40, 40), (240, 240, 240)),
-    "Brown Patches (deer/horse)":  _brown_patches(),
-    "Green Patches (frog)":        _green_patches(),
-    "Dark Textured (cat/dog)":     _dark_textured(),
-    "Water Scene (ship)":          _water_scene(),
-    "Grey Block (truck)":          _solid((140, 140, 150)),
+    "Sky Scene":   _sky_scene(),
+    "Red Circle on White":   _circle_on_bg((200, 40, 40), (240, 240, 240)),
+    "Brown Patches":  _brown_patches(),
+    "Green Patches":        _green_patches(),
+    "Dark Textured":     _dark_textured(),
+    "Water Scene":          _water_scene(),
+    "Grey Block":          _solid((140, 140, 150)),
     "Checkerboard":                _checkerboard(),
     "Rainbow Stripes":             _horizontal_stripes(),
     "Blue Gradient":               _gradient(),
