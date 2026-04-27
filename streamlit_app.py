@@ -55,6 +55,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+
 class PrunableLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int, bias: bool = True) -> None:
         super().__init__()
@@ -90,11 +91,12 @@ class SelfPruningMLP(nn.Module):
                 self.drops.append(nn.Dropout(dropout))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = x.view(x.size(0), -1)
+        x = x.reshape(x.size(0), -1)
         for i, layer in enumerate(self.layers[:-1]):
             x = layer(x)
             x = self.bns[i](x)
             x = F.relu(x)
+            x = self.drops[i](x)
         return self.layers[-1](x)
 
 
@@ -114,11 +116,11 @@ if not MODEL_PATH.exists():
     st.stop()
 
 model, artifact = load_model_artifact()
-CLASSES       = artifact['cifar10_classes']
-NORM_MEAN     = artifact['normalize_mean']
-NORM_STD      = artifact['normalize_std']
-BEST_METRICS  = artifact['metrics']
-LAYER_SP      = artifact['layer_sparsity']
+CLASSES        = artifact['cifar10_classes']
+NORM_MEAN      = artifact['normalize_mean']
+NORM_STD       = artifact['normalize_std']
+BEST_METRICS   = artifact['metrics']
+LAYER_SP       = artifact['layer_sparsity']
 LAMBDA_RESULTS = artifact.get('all_lambda_results', [])
 BASELINE_ACC   = artifact.get('baseline_accuracy', None)
 SWEEP          = artifact.get('threshold_sweep', [])
@@ -129,8 +131,9 @@ def preprocess_image(img: Image.Image) -> torch.Tensor:
     img = img.convert('RGB').resize((32, 32), Image.LANCZOS)
     arr = np.array(img).astype(np.float32) / 255.0
     arr = (arr - np.array(NORM_MEAN)) / np.array(NORM_STD)
-    tensor = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0)
+    tensor = torch.from_numpy(arr.copy()).permute(2, 0, 1).unsqueeze(0)
     return tensor
+
 
 @torch.no_grad()
 def predict(img: Image.Image) -> Tuple[str, float, List[float]]:
@@ -139,6 +142,7 @@ def predict(img: Image.Image) -> Tuple[str, float, List[float]]:
     probs  = F.softmax(logits, dim=1).squeeze().tolist()
     idx    = int(np.argmax(probs))
     return CLASSES[idx], probs[idx] * 100, probs
+
 
 PLOT_CFG = {
     'figure.facecolor': '#0f1117',
@@ -216,9 +220,9 @@ def make_tradeoff_chart() -> bytes:
         sc  = ax.scatter(sp, acc, c=np.log10(lam), cmap='plasma', s=120, zorder=5)
         ax.plot(sp, acc, '--', color='#888', linewidth=1, alpha=0.5)
         cb = plt.colorbar(sc, ax=ax)
-        cb.set_label('log₁₀(λ)')
+        cb.set_label('log10(lambda)')
         for s, a, l in zip(sp, acc, lam):
-            ax.annotate(f'λ={l}', (s, a), xytext=(5, 4), textcoords='offset points', fontsize=8)
+            ax.annotate(f'lambda={l}', (s, a), xytext=(5, 4), textcoords='offset points', fontsize=8)
         ax.set_xlabel('Sparsity (%)')
         ax.set_ylabel('Test Accuracy (%)')
         ax.set_title('Accuracy vs. Sparsity Tradeoff')
@@ -231,7 +235,7 @@ with st.sidebar:
     st.markdown("---")
 
     st.markdown("### Best Model")
-    st.markdown(f"<span class='pill'>λ = {BEST_METRICS['lambda']}</span>", unsafe_allow_html=True)
+    st.markdown(f"<span class='pill'>lambda = {BEST_METRICS['lambda']}</span>", unsafe_allow_html=True)
     st.markdown(f"<span class='pill'>Acc = {BEST_METRICS['test_accuracy']:.2f}%</span>", unsafe_allow_html=True)
     st.markdown(f"<span class='pill'>Sparsity = {BEST_METRICS['sparsity_pct']:.2f}%</span>", unsafe_allow_html=True)
     st.markdown(f"<span class='pill'>{BEST_METRICS['compression_ratio']:.2f}x compressed</span>", unsafe_allow_html=True)
@@ -245,7 +249,7 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown("### Architecture")
-    st.markdown("3072 → 2048 → 1024 → 512 → 256 → 10")
+    st.markdown("3072 -> 2048 -> 1024 -> 512 -> 256 -> 10")
     st.markdown("PrunableLinear + BatchNorm + ReLU + Dropout")
 
 
@@ -263,7 +267,7 @@ with tab1:
 
     with col_upload:
         st.markdown("#### Upload an Image")
-        st.caption("Upload any 32×32 (or larger) image; it will be resized to CIFAR-10 format.")
+        st.caption("Upload any 32x32 (or larger) image; it will be resized to CIFAR-10 format.")
         uploaded = st.file_uploader("", type=["png", "jpg", "jpeg", "bmp", "webp"])
 
         if uploaded:
@@ -396,21 +400,21 @@ with tab3:
 with tab4:
     st.markdown("#### How Self-Pruning Works")
     st.markdown("""
-    Each weight in every `PrunableLinear` layer has a learnable **gate score** parameter.  
+    Each weight in every `PrunableLinear` layer has a learnable **gate score** parameter.
     During forward pass:
     ```
     gate = sigmoid(gate_score / temperature)
-    effective_weight = weight × gate
+    effective_weight = weight x gate
     ```
-    The sparsity loss penalises the sum of all gate values, pushing them toward **0** (connection removed).  
-    Total loss = CrossEntropyLoss + λ × Σ sigmoid(gate\_scores)
+    The sparsity loss penalises the sum of all gate values, pushing them toward **0** (connection removed).
+    Total loss = CrossEntropyLoss + lambda x sum(sigmoid(gate_scores))
 
-    **Temperature annealing** sharpens gates from soft (≈0.5) toward hard binary (0 or 1) over training epochs,  
-    using cosine decay from `temperature_start=1.0` → `temperature_end=0.1`.
+    **Temperature annealing** sharpens gates from soft (approx 0.5) toward hard binary (0 or 1) over training epochs,
+    using cosine decay from temperature_start=1.0 to temperature_end=0.1.
     """)
 
     st.markdown("---")
-    st.markdown("#### Live Gate Sample (Layer 0, first 8×8 block)")
+    st.markdown("#### Live Gate Sample (Layer 0, first 8x8 block)")
     with torch.no_grad():
         sample_gates = model.layers[0].get_gates()
     block = sample_gates[:8, :8].numpy()
@@ -419,13 +423,13 @@ with tab4:
         fig, ax = plt.subplots(figsize=(7, 4))
         im = ax.imshow(block, cmap='RdYlGn', vmin=0, vmax=1, aspect='auto')
         plt.colorbar(im, ax=ax, label='Gate Value')
-        ax.set_title('Gate Values — Layer 0 (8×8 sample, green=active, red=pruned)')
+        ax.set_title('Gate Values - Layer 0 (8x8 sample, green=active, red=pruned)')
         ax.set_xlabel('Input Neuron Index')
         ax.set_ylabel('Output Neuron Index')
     st.image(fig_to_bytes(fig), use_container_width=True)
 
     st.markdown("---")
-    st.markdown("#### Active Parameter %  by Layer")
+    st.markdown("#### Active Parameter % by Layer")
     for name, sparsity_val in LAYER_SP.items():
         active_pct = 100 - sparsity_val
         st.progress(int(active_pct), text=f"{name}: {active_pct:.1f}% active")
@@ -433,7 +437,7 @@ with tab4:
     struct_stats = artifact.get('structured_stats', {})
     if struct_stats:
         st.markdown("---")
-        st.markdown("#### Structured Pruning — Dead Neurons")
+        st.markdown("#### Structured Pruning - Dead Neurons")
         import pandas as pd
         rows = [{'Layer Metric': k, 'Dead Neurons': v} for k, v in struct_stats.items()]
         st.dataframe(pd.DataFrame(rows), use_container_width=True)
