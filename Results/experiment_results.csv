@@ -1,0 +1,5 @@
+lambda,test_accuracy,sparsity_pct,active_weights,total_weights,compression_ratio,params_saved,flops_saved_pct,dense_baseline_accuracy,accuracy_drop_vs_dense
+0.0001,62.99,0.0,9046528,9046528,1.0,0,0.0,62.56,-0.43
+0.0005,62.68,0.0,9046528,9046528,1.0,0,0.0,62.56,-0.12
+0.001,62.73,0.0,9046528,9046528,1.0,0,0.0,62.56,-0.17
+0.005,62.79,0.0,9046528,9046528,1.0,0,0.0,62.56,-0.23

@@ -1,0 +1,5 @@
+Lambda,Test Acc (%),Sparsity (%),Active Weights,Compression Ratio,Params Saved,FLOPs Saved (%),Acc Drop vs Dense
+0.0001,62.99,0.0,9046528,1.0,0,0.0,-0.43
+0.0005,62.68,0.0,9046528,1.0,0,0.0,-0.12
+0.001,62.73,0.0,9046528,1.0,0,0.0,-0.17
+0.005,62.79,0.0,9046528,1.0,0,0.0,-0.23

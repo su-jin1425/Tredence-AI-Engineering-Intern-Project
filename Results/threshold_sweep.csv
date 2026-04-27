@@ -1,0 +1,4 @@
+threshold,accuracy_pct,sparsity_pct
+0.1,52.47,0.0
+0.01,52.47,0.0
+0.001,52.47,0.0
