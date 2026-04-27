@@ -128,48 +128,116 @@ class SelfPruningMLP(nn.Module):
         return sum(l.gate_scores.numel() for l in self.layers)
 
 
-CIFAR10_CLASSES_ORDERED = [
-    'airplane', 'automobile', 'bird', 'cat', 'deer',
-    'dog', 'frog', 'horse', 'ship', 'truck',
-]
+def _solid(color: Tuple[int, int, int], size: int = 64) -> Image.Image:
+    return Image.fromarray(np.full((size, size, 3), color, dtype=np.uint8))
 
-_GITHUB_BASE = (
-    "https://raw.githubusercontent.com"
-    "/YoongiKim/CIFAR-10-images/master/test"
-)
 
-_SAMPLE_INDICES = {
-    'airplane':   '0001',
-    'automobile': '0001',
-    'bird':       '0001',
-    'cat':        '0001',
-    'deer':       '0001',
-    'dog':        '0001',
-    'frog':       '0001',
-    'horse':      '0001',
-    'ship':       '0001',
-    'truck':      '0001',
+def _checkerboard(size: int = 64) -> Image.Image:
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    for i in range(size):
+        for j in range(size):
+            arr[i, j] = [220, 220, 220] if (i // 8 + j // 8) % 2 == 0 else [40, 40, 40]
+    return Image.fromarray(arr)
+
+
+def _gradient(size: int = 64) -> Image.Image:
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    for i in range(size):
+        for j in range(size):
+            arr[i, j] = [int(255 * i / size), int(255 * j / size), 128]
+    return Image.fromarray(arr)
+
+
+def _noise(size: int = 64) -> Image.Image:
+    return Image.fromarray(np.random.randint(0, 256, (size, size, 3), dtype=np.uint8))
+
+
+def _horizontal_stripes(size: int = 64) -> Image.Image:
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    stripe_colors = [
+        [220, 60, 60], [60, 180, 60], [60, 60, 220],
+        [220, 220, 60], [220, 60, 220], [60, 220, 220],
+        [220, 140, 60], [140, 60, 220],
+    ]
+    stripe_h = size // len(stripe_colors)
+    for idx, c in enumerate(stripe_colors):
+        arr[idx * stripe_h:(idx + 1) * stripe_h, :] = c
+    return Image.fromarray(arr)
+
+
+def _circle_on_bg(fg: Tuple[int, int, int], bg: Tuple[int, int, int], size: int = 64) -> Image.Image:
+    arr = np.full((size, size, 3), bg, dtype=np.uint8)
+    cx, cy, r = size // 2, size // 2, size // 3
+    for i in range(size):
+        for j in range(size):
+            if (i - cy) ** 2 + (j - cx) ** 2 <= r ** 2:
+                arr[i, j] = fg
+    return Image.fromarray(arr)
+
+
+def _sky_scene(size: int = 64) -> Image.Image:
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    for i in range(size):
+        t = i / size
+        arr[i, :] = [
+            int(135 * (1 - t) + 70 * t),
+            int(206 * (1 - t) + 130 * t),
+            int(235 * (1 - t) + 180 * t),
+        ]
+    arr[size // 2:, :] = [34, 139, 34]
+    return Image.fromarray(arr)
+
+
+def _water_scene(size: int = 64) -> Image.Image:
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    for i in range(size):
+        for j in range(size):
+            wave = int(10 * np.sin(j * 0.5 + i * 0.3))
+            arr[i, j] = [20 + wave, 80 + wave, 180 + wave // 2]
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
+
+
+def _dark_textured(size: int = 64) -> Image.Image:
+    rng = np.random.RandomState(42)
+    base = rng.randint(20, 60, (size, size, 3), dtype=np.uint8)
+    for i in range(0, size, 4):
+        base[i, :] = (base[i, :] * 0.7).astype(np.uint8)
+    return Image.fromarray(base)
+
+
+def _brown_patches(size: int = 64) -> Image.Image:
+    rng = np.random.RandomState(7)
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    for i in range(size):
+        for j in range(size):
+            v = rng.randint(0, 40)
+            arr[i, j] = [120 + v, 80 + v, 40 + v]
+    return Image.fromarray(arr)
+
+
+def _green_patches(size: int = 64) -> Image.Image:
+    rng = np.random.RandomState(13)
+    arr = np.zeros((size, size, 3), dtype=np.uint8)
+    for i in range(size):
+        for j in range(size):
+            v = rng.randint(0, 50)
+            arr[i, j] = [20 + v // 2, 100 + v, 20 + v // 2]
+    return Image.fromarray(arr)
+
+
+BUILTIN_PRESETS: Dict[str, Image.Image] = {
+    "Sky Scene (airplane/bird)":   _sky_scene(),
+    "Red Circle on White (car)":   _circle_on_bg((200, 40, 40), (240, 240, 240)),
+    "Brown Patches (deer/horse)":  _brown_patches(),
+    "Green Patches (frog)":        _green_patches(),
+    "Dark Textured (cat/dog)":     _dark_textured(),
+    "Water Scene (ship)":          _water_scene(),
+    "Grey Block (truck)":          _solid((140, 140, 150)),
+    "Checkerboard":                _checkerboard(),
+    "Rainbow Stripes":             _horizontal_stripes(),
+    "Blue Gradient":               _gradient(),
+    "Random Noise":                _noise(),
 }
-
-
-@st.cache_resource(show_spinner=False)
-def load_cifar10_presets() -> Dict[str, Image.Image]:
-    import urllib.request
-    presets: Dict[str, Image.Image] = {}
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    for cls in CIFAR10_CLASSES_ORDERED:
-        idx = _SAMPLE_INDICES[cls]
-        url = f"{_GITHUB_BASE}/{cls}/{idx}.png"
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = resp.read()
-            img = Image.open(io.BytesIO(data)).convert('RGB')
-            presets[cls] = img
-        except Exception:
-            arr = np.full((32, 32, 3), 128, dtype=np.uint8)
-            presets[cls] = Image.fromarray(arr)
-    return presets
 
 
 @st.cache_resource
@@ -311,28 +379,26 @@ def make_tradeoff_chart() -> Optional[bytes]:
     return fig_to_bytes(fig)
 
 
-def make_preset_grid(presets: Dict[str, Image.Image], selected_name: str) -> bytes:
-    cols_n = 5
-    rows_n = math.ceil(len(presets) / cols_n)
+def make_preset_grid(selected_name: str) -> bytes:
+    cols_n = 4
+    rows_n = math.ceil(len(BUILTIN_PRESETS) / cols_n)
     with plt.rc_context(PLOT_CFG):
         fig, axes = plt.subplots(rows_n, cols_n,
-                                 figsize=(cols_n * 2.0, rows_n * 2.4))
-        axes_flat = axes.flatten() if rows_n > 1 else list(axes)
-        for idx, (name, img) in enumerate(presets.items()):
+                                 figsize=(cols_n * 2.2, rows_n * 2.4))
+        axes_flat = axes.flatten()
+        for idx, (name, img) in enumerate(BUILTIN_PRESETS.items()):
             ax = axes_flat[idx]
-            display = img.resize((64, 64), Image.NEAREST)
-            ax.imshow(display)
-            label = name.replace('_', ' ').capitalize()
-            ax.set_title(label, fontsize=8, color='#e0e0e0', pad=3)
+            ax.imshow(img.resize((64, 64)))
+            ax.set_title(name, fontsize=7, color='#e0e0e0', pad=3)
             ax.axis('off')
             if name == selected_name:
                 for spine in ax.spines.values():
                     spine.set_edgecolor('#7c6cf8')
                     spine.set_linewidth(3)
                     spine.set_visible(True)
-        for idx in range(len(presets), len(axes_flat)):
+        for idx in range(len(BUILTIN_PRESETS), len(axes_flat)):
             axes_flat[idx].axis('off')
-        fig.tight_layout(pad=0.4)
+        fig.tight_layout(pad=0.5)
     return fig_to_bytes(fig)
 
 
@@ -401,22 +467,17 @@ with tab1:
                 st.image(active_image, caption="Uploaded Image", use_container_width=True)
 
         else:
-            with st.spinner("Loading CIFAR-10 sample images..."):
-                cifar_presets = load_cifar10_presets()
+            preset_name = st.selectbox("Choose a preset", list(BUILTIN_PRESETS.keys()))
+            active_image = BUILTIN_PRESETS[preset_name]
 
-            preset_name = st.selectbox("Choose a class", list(cifar_presets.keys()))
-            active_image = cifar_presets[preset_name]
+            st.image(active_image, caption=f"Selected: {preset_name}",
+                     use_container_width=False, width=160)
 
-            st.markdown("**Selected sample (32x32 native CIFAR-10):**")
-            st.image(active_image.resize((128, 128), Image.NEAREST),
-                     caption=f"{preset_name}", width=128)
-
-            st.markdown("**All 10 CIFAR-10 classes:**")
-            st.image(make_preset_grid(cifar_presets, preset_name), use_container_width=True)
+            st.markdown("**All presets:**")
+            st.image(make_preset_grid(preset_name), use_container_width=True)
             st.caption(
-                "Images are real 32x32 samples from the CIFAR-10 test set "
-                "(YoongiKim/CIFAR-10-images). Nearest-neighbour upscaling is used for display only; "
-                "inference uses the original 32x32 pixels."
+                "These synthetic images probe model inference. "
+                "Upload a real photo for meaningful CIFAR-10 predictions."
             )
 
     with col_result:
