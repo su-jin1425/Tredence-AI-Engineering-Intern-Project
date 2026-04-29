@@ -1,6 +1,7 @@
 import io
 import math
 import pickle
+import urllib.request
 import warnings
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -128,116 +129,135 @@ class SelfPruningMLP(nn.Module):
         return sum(l.gate_scores.numel() for l in self.layers)
 
 
-def _solid(color: Tuple[int, int, int], size: int = 64) -> Image.Image:
+def _load_url_image(url: str, size: int = 64) -> Image.Image:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = resp.read()
+        img = Image.open(io.BytesIO(data)).convert("RGB").resize((size, size), Image.LANCZOS)
+        return img
+    except Exception:
+        return _placeholder_solid((120, 120, 120), size)
+
+
+def _placeholder_solid(color: Tuple[int, int, int], size: int = 64) -> Image.Image:
     return Image.fromarray(np.full((size, size, 3), color, dtype=np.uint8))
 
 
-def _checkerboard(size: int = 64) -> Image.Image:
-    arr = np.zeros((size, size, 3), dtype=np.uint8)
+def _placeholder_automobile(size: int = 64) -> Image.Image:
+    arr = np.full((size, size, 3), [30, 30, 30], dtype=np.uint8)
+    body_top, body_bot = size // 3, 2 * size // 3
+    arr[body_top:body_bot, size // 8: 7 * size // 8] = [180, 50, 50]
+    arr[body_bot - size // 10: body_bot, size // 8: 7 * size // 8] = [80, 80, 80]
+    wheel_r = size // 8
+    for cx in [size // 4, 3 * size // 4]:
+        cy = body_bot
+        for i in range(size):
+            for j in range(size):
+                if (i - cy) ** 2 + (j - cx) ** 2 <= wheel_r ** 2:
+                    arr[i, j] = [40, 40, 40]
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
+
+
+def _placeholder_deer(size: int = 64) -> Image.Image:
+    arr = np.full((size, size, 3), [34, 120, 34], dtype=np.uint8)
+    body_r = size // 5
+    bx, by = size // 2, size // 2 + size // 10
     for i in range(size):
         for j in range(size):
-            arr[i, j] = [220, 220, 220] if (i // 8 + j // 8) % 2 == 0 else [40, 40, 40]
-    return Image.fromarray(arr)
-
-
-def _gradient(size: int = 64) -> Image.Image:
-    arr = np.zeros((size, size, 3), dtype=np.uint8)
+            if (i - by) ** 2 + (j - bx) ** 2 <= body_r ** 2:
+                arr[i, j] = [160, 100, 60]
+    head_r = size // 9
+    hx, hy = size // 2, by - body_r - head_r + 2
     for i in range(size):
         for j in range(size):
-            arr[i, j] = [int(255 * i / size), int(255 * j / size), 128]
-    return Image.fromarray(arr)
+            if (i - hy) ** 2 + (j - hx) ** 2 <= head_r ** 2:
+                arr[i, j] = [160, 100, 60]
+    for dx in [-size // 10, size // 10]:
+        for dy in range(size // 6):
+            r, c = hy - dy, hx + dx
+            if 0 <= r < size and 0 <= c < size:
+                arr[r, c] = [100, 70, 30]
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
 
-def _noise(size: int = 64) -> Image.Image:
-    return Image.fromarray(np.random.randint(0, 256, (size, size, 3), dtype=np.uint8))
-
-
-def _horizontal_stripes(size: int = 64) -> Image.Image:
-    arr = np.zeros((size, size, 3), dtype=np.uint8)
-    stripe_colors = [
-        [220, 60, 60], [60, 180, 60], [60, 60, 220],
-        [220, 220, 60], [220, 60, 220], [60, 220, 220],
-        [220, 140, 60], [140, 60, 220],
-    ]
-    stripe_h = size // len(stripe_colors)
-    for idx, c in enumerate(stripe_colors):
-        arr[idx * stripe_h:(idx + 1) * stripe_h, :] = c
-    return Image.fromarray(arr)
-
-
-def _circle_on_bg(fg: Tuple[int, int, int], bg: Tuple[int, int, int], size: int = 64) -> Image.Image:
-    arr = np.full((size, size, 3), bg, dtype=np.uint8)
-    cx, cy, r = size // 2, size // 2, size // 3
+def _placeholder_dog(size: int = 64) -> Image.Image:
+    arr = np.full((size, size, 3), [210, 180, 140], dtype=np.uint8)
+    body_r = size // 5
+    bx, by = size // 2, size // 2 + size // 8
     for i in range(size):
         for j in range(size):
-            if (i - cy) ** 2 + (j - cx) ** 2 <= r ** 2:
-                arr[i, j] = fg
-    return Image.fromarray(arr)
+            if (i - by) ** 2 + (j - bx) ** 2 <= body_r ** 2:
+                arr[i, j] = [180, 130, 80]
+    head_r = size // 8
+    hx, hy = size // 2, by - body_r - head_r + 4
+    for i in range(size):
+        for j in range(size):
+            if (i - hy) ** 2 + (j - hx) ** 2 <= head_r ** 2:
+                arr[i, j] = [180, 130, 80]
+    ear_r = size // 10
+    for ex in [-size // 7, size // 7]:
+        ey = hy - head_r + 2
+        for i in range(size):
+            for j in range(size):
+                if (i - ey) ** 2 + (j - hx + ex) ** 2 <= ear_r ** 2:
+                    arr[i, j] = [120, 80, 40]
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
 
-def _sky_scene(size: int = 64) -> Image.Image:
+def _placeholder_ship(size: int = 64) -> Image.Image:
     arr = np.zeros((size, size, 3), dtype=np.uint8)
     for i in range(size):
         t = i / size
         arr[i, :] = [
-            int(135 * (1 - t) + 70 * t),
-            int(206 * (1 - t) + 130 * t),
-            int(235 * (1 - t) + 180 * t),
+            int(70 * (1 - t) + 20 * t),
+            int(130 * (1 - t) + 60 * t),
+            int(200 * (1 - t) + 120 * t),
         ]
-    arr[size // 2:, :] = [34, 139, 34]
-    return Image.fromarray(arr)
-
-
-def _water_scene(size: int = 64) -> Image.Image:
-    arr = np.zeros((size, size, 3), dtype=np.uint8)
-    for i in range(size):
-        for j in range(size):
-            wave = int(10 * np.sin(j * 0.5 + i * 0.3))
-            arr[i, j] = [20 + wave, 80 + wave, 180 + wave // 2]
+    hull_top = size // 2
+    for i in range(hull_top, hull_top + size // 5):
+        width = int((size * 0.8) * (1 - (i - hull_top) / (size // 5)) + size * 0.2)
+        left = (size - width) // 2
+        arr[i, left:left + width] = [180, 50, 50]
+    for i in range(size // 5, hull_top):
+        arr[i, size // 2 - 2: size // 2 + 2] = [220, 220, 200]
     return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
 
-def _dark_textured(size: int = 64) -> Image.Image:
-    rng = np.random.RandomState(42)
-    base = rng.randint(20, 60, (size, size, 3), dtype=np.uint8)
-    for i in range(0, size, 4):
-        base[i, :] = (base[i, :] * 0.7).astype(np.uint8)
-    return Image.fromarray(base)
+def _placeholder_truck(size: int = 64) -> Image.Image:
+    arr = np.full((size, size, 3), [30, 30, 30], dtype=np.uint8)
+    arr[size // 3: 2 * size // 3, size // 8: size // 2] = [60, 90, 180]
+    arr[size // 4: 2 * size // 3, size // 2: 7 * size // 8] = [80, 80, 80]
+    wheel_r = size // 9
+    for cx in [size // 4, size // 2 + size // 6]:
+        cy = 2 * size // 3
+        for i in range(size):
+            for j in range(size):
+                if (i - cy) ** 2 + (j - cx) ** 2 <= wheel_r ** 2:
+                    arr[i, j] = [40, 40, 40]
+    return Image.fromarray(arr.clip(0, 255).astype(np.uint8))
 
 
-def _brown_patches(size: int = 64) -> Image.Image:
-    rng = np.random.RandomState(7)
-    arr = np.zeros((size, size, 3), dtype=np.uint8)
-    for i in range(size):
-        for j in range(size):
-            v = rng.randint(0, 40)
-            arr[i, j] = [120 + v, 80 + v, 40 + v]
-    return Image.fromarray(arr)
+@st.cache_resource
+def build_presets() -> Dict[str, Image.Image]:
+    airplane_url = "https://raw.githubusercontent.com/su-jin1425/Tredence-AI-Engineering-Intern-Project/266445b81b168615081055dc339c92c3a5f28d1b/Sample%20images/AIRPLANE.png"
+    bird_url     = "https://raw.githubusercontent.com/su-jin1425/Tredence-AI-Engineering-Intern-Project/266445b81b168615081055dc339c92c3a5f28d1b/Sample%20images/BIRD.png"
+    cat_url      = "https://raw.githubusercontent.com/su-jin1425/Tredence-AI-Engineering-Intern-Project/266445b81b168615081055dc339c92c3a5f28d1b/Sample%20images/CAT.png"
+    frog_url     = "https://raw.githubusercontent.com/su-jin1425/Tredence-AI-Engineering-Intern-Project/266445b81b168615081055dc339c92c3a5f28d1b/Sample%20images/FROG.png"
+    horse_url    = "https://raw.githubusercontent.com/su-jin1425/Tredence-AI-Engineering-Intern-Project/266445b81b168615081055dc339c92c3a5f28d1b/Sample%20images/HORSE.png"
 
-
-def _green_patches(size: int = 64) -> Image.Image:
-    rng = np.random.RandomState(13)
-    arr = np.zeros((size, size, 3), dtype=np.uint8)
-    for i in range(size):
-        for j in range(size):
-            v = rng.randint(0, 50)
-            arr[i, j] = [20 + v // 2, 100 + v, 20 + v // 2]
-    return Image.fromarray(arr)
-
-
-BUILTIN_PRESETS: Dict[str, Image.Image] = {
-    "Sky Scene":   _sky_scene(),
-    "Red Circle on White":   _circle_on_bg((200, 40, 40), (240, 240, 240)),
-    "Brown Patches":  _brown_patches(),
-    "Green Patches":        _green_patches(),
-    "Dark Textured":     _dark_textured(),
-    "Water Scene":          _water_scene(),
-    "Grey Block":          _solid((140, 140, 150)),
-    "Checkerboard":                _checkerboard(),
-    "Rainbow Stripes":             _horizontal_stripes(),
-    "Blue Gradient":               _gradient(),
-    "Random Noise":                _noise(),
-}
+    return {
+        "Airplane":    _load_url_image(airplane_url),
+        "Automobile":  _placeholder_automobile(),
+        "Bird":        _load_url_image(bird_url),
+        "Cat":         _load_url_image(cat_url),
+        "Deer":        _placeholder_deer(),
+        "Dog":         _placeholder_dog(),
+        "Frog":        _load_url_image(frog_url),
+        "Horse":       _load_url_image(horse_url),
+        "Ship":        _placeholder_ship(),
+        "Truck":       _placeholder_truck(),
+    }
 
 
 @st.cache_resource
@@ -261,16 +281,17 @@ if not MODEL_PATH.exists():
     st.error("model.pkl not found. Please run case_study.ipynb first to generate it.")
     st.stop()
 
-model, artifact = load_model_artifact()
-CLASSES        = artifact['cifar10_classes']
-NORM_MEAN      = artifact['normalize_mean']
-NORM_STD       = artifact['normalize_std']
-BEST_METRICS   = artifact['metrics']
-LAYER_SP       = artifact['layer_sparsity']
-LAMBDA_RESULTS = artifact.get('all_lambda_results', [])
-BASELINE_ACC   = artifact.get('baseline_accuracy', None)
-SWEEP          = artifact.get('threshold_sweep', [])
-BONUS_VARIANTS = artifact.get('bonus_variants', [])
+model, artifact    = load_model_artifact()
+BUILTIN_PRESETS    = build_presets()
+CLASSES            = artifact['cifar10_classes']
+NORM_MEAN          = artifact['normalize_mean']
+NORM_STD           = artifact['normalize_std']
+BEST_METRICS       = artifact['metrics']
+LAYER_SP           = artifact['layer_sparsity']
+LAMBDA_RESULTS     = artifact.get('all_lambda_results', [])
+BASELINE_ACC       = artifact.get('baseline_accuracy', None)
+SWEEP              = artifact.get('threshold_sweep', [])
+BONUS_VARIANTS     = artifact.get('bonus_variants', [])
 
 
 def preprocess_image(img: Image.Image) -> torch.Tensor:
@@ -380,12 +401,12 @@ def make_tradeoff_chart() -> Optional[bytes]:
 
 
 def make_preset_grid(selected_name: str) -> bytes:
-    cols_n = 4
+    cols_n = 5
     rows_n = math.ceil(len(BUILTIN_PRESETS) / cols_n)
     with plt.rc_context(PLOT_CFG):
         fig, axes = plt.subplots(rows_n, cols_n,
                                  figsize=(cols_n * 2.2, rows_n * 2.4))
-        axes_flat = axes.flatten()
+        axes_flat = axes.flatten() if rows_n > 1 else list(axes)
         for idx, (name, img) in enumerate(BUILTIN_PRESETS.items()):
             ax = axes_flat[idx]
             ax.imshow(img.resize((64, 64)))
@@ -453,7 +474,7 @@ with tab1:
 
     with col_upload:
         st.markdown("#### Upload or Select an Image")
-        st.caption("Upload your own image or choose a synthetic preset below.")
+        st.caption("Upload your own image or choose a sample below.")
 
         input_mode = st.radio("Input mode", ["Upload image", "Use preset sample"],
                               horizontal=True)
@@ -476,8 +497,9 @@ with tab1:
             st.markdown("**All presets:**")
             st.image(make_preset_grid(preset_name), use_container_width=True)
             st.caption(
-                "These synthetic images probe model inference. "
-                "Upload a real photo for meaningful CIFAR-10 predictions."
+                "Real images are loaded from the project repo. "
+                "Placeholder images are synthetic renderings. "
+                "Upload a real photo for the most meaningful CIFAR-10 predictions."
             )
 
     with col_result:
