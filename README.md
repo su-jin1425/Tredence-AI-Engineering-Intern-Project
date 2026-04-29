@@ -3,6 +3,7 @@
 
 [![Open in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/su-jin1425/Tredence-AI-Engineering-Intern-Project/blob/main/case_study.ipynb)
 [![Live Demo](https://img.shields.io/badge/Live%20Demo-Streamlit-red)](https://tredence-ai-engineering-intern-project-sujith.streamlit.app)
+[![Google Drive](https://img.shields.io/badge/Google%20Drive-Checkpoints%20%7C%20Results%20%7C%20Source-4285F4?logo=googledrive&logoColor=white)](https://drive.google.com/drive/folders/1E4L2oDu_bb3x5E-6Hc4fHo3yqgalDeJe?usp=drive_link)
 
 ---
 
@@ -255,6 +256,23 @@ Checkpoints are saved after every epoch to Google Drive at `self_pruning_nn/Chec
     'final_temperature':    0.1,
 }
 ```
+
+---
+
+## Google Drive Resources
+
+All training artifacts — checkpoints, result CSVs/PNGs, and source files — are publicly available on Google Drive:
+
+**[📁 Open Drive Folder](https://drive.google.com/drive/folders/1E4L2oDu_bb3x5E-6Hc4fHo3yqgalDeJe?usp=drive_link)**
+
+| Folder / File | Contents |
+|---|---|
+| `Checkpoints/` | Per-epoch `.pt` files for baseline, all 8 λ runs, lottery ticket, and bonus variants |
+| `Results/` | All 6 charts (`.png`), `experiment_results.csv`, `summary_table.csv`, `best_model_metrics.json`, `threshold_sweep.csv` |
+| `case_study.ipynb` | Full source notebook (16 cells) |
+| `streamlit_app.py` | Streamlit dashboard source |
+| `model.pkl` | Exported best model state + all metrics |
+| `requirements.txt` | Dependency list |
 
 ---
 
