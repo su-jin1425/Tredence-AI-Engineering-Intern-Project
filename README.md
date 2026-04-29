@@ -3,7 +3,7 @@
 # The Self-Pruning Neural Network
 ### Tredence AI Engineering Internship — Case Study Submission
 
-Here is the develoment link : [Run on Google Colab](https://colab.research.google.com/github/su-jin1425/Tredence-AI-Engineering-Intern-Project/blob/main/case_study.ipynb)
+Here is the development link : [Run on Google Colab](https://colab.research.google.com/github/su-jin1425/Tredence-AI-Engineering-Intern-Project/blob/main/case_study.ipynb)
 
 Here is the Playable link : [Run on Chrome](https://tredence-ai-engineering-intern-project-sujith.streamlit.app)
 
@@ -11,51 +11,126 @@ Here is the Playable link : [Run on Chrome](https://tredence-ai-engineering-inte
 
 ## Project Overview
 
-This project implements a neural network that learns to **prune itself during training** using learnable weight gates. Each connection in the `PrunableLinear` head layers is controlled by a gate:
+This project implements a neural network that learns to **prune itself during training** using learnable weight gates. Each connection in every `PrunableLinear` layer is controlled by a gate with a temperature-annealed sigmoid:
 
 ```
-gates         = sigmoid(gate_scores)          # element-wise, in [0, 1]
+temperature  = cosine_anneal(T_START → T_END)
+gates        = sigmoid(gate_scores / temperature)   # element-wise, in [0, 1]
 pruned_weight = weight × gates
-output        = F.linear(x, pruned_weight, bias)
+output       = F.linear(x, pruned_weight, bias)
 ```
 
 When a gate approaches 0, the connection is effectively removed. The network simultaneously optimises for:
-1. **Classification accuracy** (Cross-Entropy Loss)
-2. **Sparsity** (L1 norm = SUM of all gate values, weighted by λ)
+1. **Classification accuracy** (Cross-Entropy Loss with label smoothing = 0.1)
+2. **Sparsity** (mean of all gate values across all `PrunableLinear` layers, weighted by λ)
 
-**Total Loss = CrossEntropyLoss + λ × Σ sigmoid(gate_scores)**
+**Total Loss = CrossEntropyLoss + λ × mean(sigmoid(gate_scores))**
 
-> **Architecture:** Pretrained ResNet-50 backbone (ImageNet) + two-layer PrunableLinear classification head.  
-> Using a pretrained CNN backbone achieves **95–97% accuracy** on CIFAR-10 while the PrunableLinear head satisfies every requirement of the case study specification.
-
----
-
-## Why 95%+ Accuracy?
-
-A pure MLP on CIFAR-10 tops out at ~58–62%. To meet the 95%+ requirement, we use:
-
-- **ResNet-50** pretrained on ImageNet as a frozen/fine-tuned feature extractor
-- Its conv layers produce a 2048-d feature vector for each image
-- Two `PrunableLinear` layers form the classification head — this is where all gate learning and self-pruning occurs
-- Fine-tuning with **differential learning rates**: backbone 3×10⁻⁵, head 3×10⁻⁴, gate scores 1.5×10⁻³
-
-This fully satisfies the case study requirements: every classification decision passes through PrunableLinear layers with learnable gate scores.
+> **Architecture:** Pure MLP — `SelfPruningMLP` with dimensions `3072 → 2048 → 1024 → 512 → 256 → 10`.  
+> All dense layers are `PrunableLinear`. BatchNorm is placed after gate multiplication for clean gradients. Three bonus variants (CompactMLP, DeepMLP, ResidualMLP) are also trained.
 
 ---
 
-## SparsityLoss Formula (Per Specification)
+## Architecture: SelfPruningMLP
 
-The case study specifies:
+The main model is a 5-hidden-layer MLP trained end-to-end on raw CIFAR-10 pixels:
 
-> *"SparsityLoss is the L1 norm of all gate values. Since our gates are always positive (after the sigmoid), this is simply the **sum** of all gate values across all PrunableLinear layers."*
-
-Implementation:
-```python
-def get_sparsity_penalty(self) -> torch.Tensor:
-    return torch.stack([l.sparsity_penalty() for l in self._prunable_layers()]).sum()
+```
+Input (3072)
+  └─ PrunableLinear(3072 → 2048) → BN → ReLU → Dropout
+  └─ PrunableLinear(2048 → 1024) → BN → ReLU → Dropout
+  └─ PrunableLinear(1024 → 512)  → BN → ReLU → Dropout
+  └─ PrunableLinear(512  → 256)  → BN → ReLU → Dropout
+  └─ PrunableLinear(256  → 10)   → logits
 ```
 
-**Why λ values are small:** The ResNet-50 head has ~1.05M gate parameters. At initialisation, the SUM ≈ 525K, while CrossEntropy ≈ 2.3. For balance: λ × 525K ≈ 2.3 → λ ≈ 4×10⁻⁶. Our sweep covers [10⁻⁷, 5×10⁻⁷, 10⁻⁶, 5×10⁻⁶, 10⁻⁵, 5×10⁻⁵].
+All layers are `PrunableLinear` — no standard `nn.Linear` in the prunable model.
+
+---
+
+## PrunableLinear: Core Component
+
+```python
+class PrunableLinear(nn.Module):
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.weight      = nn.Parameter(torch.empty(out_features, in_features))
+        self.gate_scores = nn.Parameter(torch.zeros(out_features, in_features))
+        self.temperature = 1.0   # plain float, not a Parameter
+
+    def forward(self, x):
+        gates         = torch.sigmoid(self.gate_scores / self.temperature)
+        pruned_weight = self.weight * gates
+        return F.linear(x, pruned_weight, self.bias)
+
+    def sparsity_penalty(self):
+        """Mean of gate values — normalised L1, scale-independent of layer size."""
+        return torch.sigmoid(self.gate_scores / self.temperature).mean()
+```
+
+**Gate initialisation:** `gate_scores = 0` → `sigmoid(0) = 0.5` at the start (neutral "half-open" state). The sparsity loss drives unimportant gates toward 0.
+
+---
+
+## SparsityLoss Formula
+
+The sparsity penalty is the **mean** of all gate values across all PrunableLinear layers (normalised L1, for training stability):
+
+```python
+def get_sparsity_penalty(self) -> torch.Tensor:
+    return torch.stack([l.sparsity_penalty() for l in self.layers]).mean()
+```
+
+This keeps the penalty scale consistent regardless of model size, making the same λ values meaningful across `CompactMLP`, `SelfPruningMLP`, and `DeepMLP`.
+
+---
+
+## Temperature Annealing
+
+Gate sharpness is controlled by a cosine-annealed temperature:
+
+```
+T_START = 5.0  →  T_END = 0.1   (cosine schedule over num_epochs)
+```
+
+High temperature → smooth/soft gates (good for early training).  
+Low temperature → near-binary gates (enforces hard sparsity structure at end of training).
+
+---
+
+## Training Configuration
+
+| Parameter | Value |
+|---|---|
+| `batch_size` | 256 |
+| `num_epochs` | 80 |
+| `warmup_epochs` | 5 |
+| `patience` (early stopping) | 15 |
+| `dropout_rate` | 0.25 |
+| `gate_threshold` | 0.01 |
+| `lr` | 3×10⁻⁴ |
+| `weight_decay` | 1×10⁻⁴ |
+| `grad_clip` | 1.0 |
+| Label smoothing | 0.1 |
+| Optimizer | AdamW |
+| LR schedule | Warmup + Cosine Annealing |
+| Mixed precision | AMP (if CUDA available) |
+
+**Lambda sweep:** `[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5]`
+
+---
+
+## Data Augmentation (CIFAR-10)
+
+```python
+train_transforms = [
+    RandomCrop(32, padding=4),
+    RandomHorizontalFlip(),
+    ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3),
+    RandomRotation(10),
+    Normalize(mean=(0.4914, 0.4822, 0.4465), std=(0.2023, 0.1994, 0.2010))
+]
+```
 
 ---
 
@@ -63,16 +138,67 @@ def get_sparsity_penalty(self) -> torch.Tensor:
 
 | Feature | Detail |
 |---|---|
-| `PrunableLinear` with gate_scores | `sigmoid(gate_scores) × weight`, gradients flow through both |
-| SparsityLoss | SUM of all gate values (L1 norm, per spec) |
-| 6-λ experiment sweep | [1e-7, 5e-7, 1e-6, 5e-6, 1e-5, 5e-5] |
-| Dense baseline | ResNet-50 + standard `nn.Linear` (identical capacity) |
-| Hard pruning | Gates < threshold zeroed out |
-| Lottery ticket reset + retrain | Winning ticket subnetwork identified |
+| `PrunableLinear` with `gate_scores` | `sigmoid(gate_scores / T) × weight`, gradients flow through both |
+| Temperature annealing | Cosine schedule T=5.0 → 0.1 over training |
+| SparsityLoss | MEAN of all gate values (normalised L1) |
+| 8-λ experiment sweep | `[1e-4, 5e-4, 1e-3, 5e-3, 1e-2, 5e-2, 0.1, 0.5]` |
+| Dense baseline | Same MLP capacity with `nn.Linear` (λ=0) |
+| Hard pruning | Gates < threshold zeroed, gate_scores binarised to ±10 |
+| Lottery ticket reset + retrain | Winning ticket subnetwork identified and retrained |
 | Threshold sweep (3 thresholds) | 0.1, 0.01, 0.001 |
-| Bonus variants | `CompactHead` (single PrunableLinear) + `WideHead` (3-layer) |
+| Structured pruning analysis | Dead neuron counting per layer (input + output) |
+| Bonus variants | `CompactMLP` (3072→512→256→10), `DeepMLP` (7-layer), `ResidualMLP` (residual blocks) |
 | 6 result charts | Histogram, λ-accuracy, λ-sparsity, tradeoff, training loss, layerwise |
-| Streamlit dashboard | Live demo + full analytics, works in demo mode without model.pkl |
+| Checkpoint resumption | Saves/loads full training state (model, optimizer, scheduler, scaler) |
+| AMP support | Mixed precision training on CUDA |
+| Streamlit dashboard | Live demo + full analytics, works in demo mode without `model.pkl` |
+
+---
+
+## Bonus Model Variants
+
+### CompactMLP
+Lightweight 3-layer model: `3072 → 512 → 256 → 10`
+
+### DeepMLP
+7-layer deep model: `3072 → 2048 → 2048 → 1024 → 512 → 256 → 128 → 10`
+
+### ResidualMLP
+Residual architecture: embed layer (3072→512) + 2 `ResidualPrunableBlock`s + head. Each block contains two `PrunableLinear` layers with skip connections.
+
+All three are trained at `best_lam` for direct comparison.
+
+---
+
+## Why Sparsity Emerges: Gradient Analysis
+
+The total loss is: `L = CE(logits, y) + λ × mean(sigmoid(gate_scoreᵢ))`
+
+The gradient of the penalty w.r.t. each gate score is:
+
+```
+∂penalty/∂gate_scoreᵢ = sigmoid(gate_scoreᵢ/T) × (1 − sigmoid(gate_scoreᵢ/T)) / T ≥ 0
+```
+
+This is always **non-negative**, so the optimiser always has an incentive to reduce gate scores. A smaller gate score → smaller sigmoid → gate closer to 0 → weight effectively pruned.
+
+Gates useful for classification resist this pressure (their CE gradient is large). Gates for unimportant connections get driven to 0 by the L1 penalty. This produces the characteristic **bimodal distribution**: large spike near 0 (pruned) and cluster near 1 (important).
+
+---
+
+## Metrics Computed
+
+For each λ experiment:
+
+| Metric | Description |
+|---|---|
+| `test_accuracy` | % on CIFAR-10 test set |
+| `sparsity_pct` | % of gates below threshold |
+| `active_weights` | Weights with gate ≥ threshold |
+| `compression_ratio` | total / active weights |
+| `params_saved` | Pruned weight count |
+| `flops_saved_pct` | FLOPs reduction from pruning |
+| `accuracy_drop_vs_dense` | Difference from dense baseline |
 
 ---
 
@@ -82,7 +208,7 @@ def get_sparsity_penalty(self) -> torch.Tensor:
 ├── case_study.ipynb       ← Full 16-cell experiment notebook
 ├── streamlit_app.py       ← Interactive Streamlit dashboard
 ├── requirements.txt       ← All dependencies
-├── model.pkl              ← Generated by notebook (best model, ResNet-50 weights)
+├── model.pkl              ← Generated by notebook (best model state + all metrics)
 └── Results/               ← Capital R — all output files go here
     ├── experiment_results.csv
     ├── summary_table.csv
@@ -115,9 +241,11 @@ pip install -r requirements.txt
 1. Upload `case_study.ipynb` and `requirements.txt` to Colab
 2. In the first cell, add: `!pip install -r requirements.txt`
 3. Set Runtime → Change runtime type → **T4 GPU**
-4. Run all cells — training takes ~12–25 hours on GPU
+4. Run all cells — training 8 λ experiments × 80 epochs takes ~12–25 hours on GPU
 
 **Locally (CPU):** Training will take several hours. Reduce `num_epochs` to 10 for a quick test.
+
+Checkpoints are saved after every epoch to Google Drive (`Checkpoints/`) and automatically resumed if interrupted.
 
 ---
 
@@ -131,37 +259,28 @@ The app works in **demo mode** (no `model.pkl` needed) showing representative re
 
 ---
 
-## Report
+## model.pkl Contents
 
-### Why does L1 on sigmoid gates encourage sparsity?
+The exported artifact includes:
 
-The total loss is: `L = CE(logits, y) + λ × Σ sigmoid(gate_scoreᵢ)`
-
-The gradient of the penalty w.r.t. each gate score is:
-
+```python
+{
+    'model_state_dict':     ...,          # best model weights
+    'model_class':          'SelfPruningMLP',
+    'config':               {'dropout': 0.25},
+    'metrics':              best_result,
+    'layer_sparsity':       {...},
+    'structured_stats':     {...},        # dead neuron counts
+    'threshold_sweep':      [...],        # accuracy at 0.1 / 0.01 / 0.001
+    'cifar10_classes':      [...],
+    'normalize_mean':       (0.4914, 0.4822, 0.4465),
+    'normalize_std':        (0.2023, 0.1994, 0.2010),
+    'all_lambda_results':   [...],        # full sweep table
+    'baseline_accuracy':    ...,
+    'bonus_variants':       [...],        # CompactMLP, DeepMLP, ResidualMLP
+    'final_temperature':    0.1,
+}
 ```
-∂penalty/∂gate_scoreᵢ = sigmoid(gate_scoreᵢ) × (1 − sigmoid(gate_scoreᵢ)) ≥ 0
-```
-
-This is always **non-negative**, so the optimiser always has an incentive to *reduce* gate scores. A smaller gate score → smaller sigmoid → gate closer to 0 → weight effectively pruned.
-
-Gates that are genuinely useful for classification resist this pressure (their gradient from the CE loss is large). Gates for unimportant connections get driven to 0 by the L1 penalty. This creates the characteristic **bimodal distribution**: a large spike near 0 (pruned) and a cluster near 1 (important connections preserved).
-
----
-
-### Results Table (Representative — ResNet-50, 30 epochs)
-
-| Lambda | Test Accuracy | Sparsity Level (%) | Compression |
-|--------|:------------:|:------------------:|:-----------:|
-| 1×10⁻⁷ | 96.21% |  4.2% | 1.05× |
-| 5×10⁻⁷ | 95.87% | 11.8% | 1.13× |
-| 1×10⁻⁶ | 95.63% | 22.4% | 1.29× |
-| 5×10⁻⁶ | 94.48% | 44.7% | 1.81× |
-| 1×10⁻⁵ | 92.31% | 63.2% | 2.72× |
-| 5×10⁻⁵ | 85.74% | 84.9% | 6.62× |
-| Dense ResNet (λ=0) | **96.58%** | 0.0% | 1.00× |
-
-**Key finding:** With λ=10⁻⁷, the network achieves 96.21% accuracy with only 4.2% of head connections pruned — almost no accuracy cost. At λ=10⁻⁵, we get a 2.72× compression of the head at only 4.3% accuracy drop.
 
 ---
 
@@ -169,7 +288,13 @@ Gates that are genuinely useful for classification resist this pressure (their g
 
 | Criterion | How We Satisfy It |
 |---|---|
-| **Correct PrunableLinear** | `gate_scores` same shape as `weight`; forward: `F.linear(x, weight × sigmoid(gate_scores), bias)`; both params in optimizer |
-| **Correct Training Loop** | `total_loss = CE_loss + λ × model.get_sparsity_penalty()`, where `get_sparsity_penalty()` returns the SUM of all gate values |
-| **Quality of Results** | Bimodal gate histogram ✓, clear λ trade-off table ✓, 95%+ accuracy ✓, successful pruning shown ✓ |
-| **Code Quality** | Type annotations, docstrings, modular functions, reproducible seeds, early stopping, AMP support |
+| **Correct PrunableLinear** | `gate_scores` same shape as `weight`; forward: `F.linear(x, weight × sigmoid(gate_scores/T), bias)`; both `weight` and `gate_scores` in optimizer |
+| **Temperature annealing** | Cosine schedule T_START=5.0 → T_END=0.1 propagated to all layers each epoch |
+| **Correct Training Loop** | `total_loss = CE_loss + λ × model.get_sparsity_penalty()`, where penalty is MEAN of gate values |
+| **Hard pruning** | `apply_hard_pruning()` zeroes sub-threshold weights, binarises gate_scores to ±10 |
+| **Lottery ticket** | `lottery_ticket_reset()` resets weights to initial values masked by winning ticket, then retrains |
+| **Threshold sweep** | 3 thresholds (0.1, 0.01, 0.001) tested on best model |
+| **Structured pruning** | Dead neuron counting (all input or output gates pruned) per layer |
+| **Bonus variants** | CompactMLP, DeepMLP, ResidualMLP — all trained at best λ |
+| **Quality of Results** | Bimodal gate histogram ✓, λ trade-off table ✓, layerwise sparsity ✓ |
+| **Code Quality** | Type annotations, docstrings, modular functions, seed=42, early stopping, AMP, checkpoint resumption |
